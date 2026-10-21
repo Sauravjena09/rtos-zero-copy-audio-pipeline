@@ -1,0 +1,47 @@
+/* boards/stm32f4_disco.overlay */
+
+/* 1. Enable Audio PLL for 48 kHz (8 MHz / 8 * 258 / 3 = 86 MHz) */
+&plli2s {
+    div-m = <8>;
+    mul-n = <258>;
+    div-r = <3>;
+    status = "okay";
+};
+
+/* 2. Control Plane: I2C1 for CS43L22 DAC Registers (PB6=SCL, PB9=SDA) */
+&i2c1 {
+    status = "okay";
+    pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb9>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+
+    cs43l22: cs43l22@4a {
+        compatible = "cirrus,cs43l22";
+        reg = <0x4a>;
+        reset-gpios = <&gpiod 4 GPIO_ACTIVE_HIGH>;
+    };
+};
+
+/* 3. Data Plane TX: I2S3 Master driving on-board CS43L22 DAC */
+&i2s3 {
+    status = "okay";
+    pinctrl-0 = <&i2s3_ws_pa4 &i2s3_ck_pc10 &i2s3_sd_pc12 &i2s3_mck_pc7>;
+    pinctrl-names = "default";
+    /* DMA1, Stream 5, Channel 0: Memory-to-Peripheral (TX) */
+   dmas = <&dma1 5 0 0x400 0x3>, /* TX: Stream 5, Channel 0 */
+           <&dma1 0 0 0x400 0x3>; /* RX: Stream 0, Channel 0 */
+    dma-names = "tx", "rx";
+    mck-enabled;
+};
+
+/* 4. Data Plane RX: I2S2 configured for DMA RX (DMA1, Stream 3, Channel 0) */
+&i2s2 {
+    status = "okay";
+    pinctrl-0 = <&i2s2_ws_pb12 &i2s2_ck_pb13 &i2s2_sd_pb15>;
+    pinctrl-names = "default";
+    /* DMA1, Stream 3, Channel 0: Peripheral-to-Memory (RX) */
+    dmas = <&dma1 4 0 0x400 0x3>, /* TX: Stream 4, Channel 0 */
+           <&dma1 3 0 0x400 0x3>; /* RX: Stream 3, Channel 0 */
+    dma-names = "tx", "rx";
+
+};

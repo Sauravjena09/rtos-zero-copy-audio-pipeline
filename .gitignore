@@ -1,0 +1,10 @@
+# Zephyr build system & artifacts
+build/
+.west/
+*.elf
+*.bin
+*.hex
+*.map
+
+# Editor configurations
+.vscode/
