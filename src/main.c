@@ -3,20 +3,12 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/i2s.h>
-#include <zephyr/usb/usb_device.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
+#include <string.h>
+#include "audio_pipeline.h"
 
-LOG_MODULE_REGISTER(audio_loopback, LOG_LEVEL_INF);
-
-#define SAMPLE_RATE 48000U
-#define SAMPLE_BIT_WIDTH 16U
-#define BYTES_PER_SAMPLE   sizeof(int16_t)
-#define NUM_CHANNELS 2U
-#define SAMPLES_PER_BLOCK   ((SAMPLE_RATE / 100) * NUM_CHANNELS)
-#define BLOCK_SIZE          (BYTES_PER_SAMPLE * SAMPLES_PER_BLOCK)
-#define BLOCK_COUNT         6U
-
-K_MEM_SLAB_DEFINE(audio_mem_slab, BLOCK_SIZE, BLOCK_COUNT, 4);
+LOG_MODULE_REGISTER(main_boot, LOG_LEVEL_INF);
 
 #define CS43L22_I2C_ADDR  0x4AU
 
@@ -25,44 +17,62 @@ static const struct gpio_dt_spec dac_reset = GPIO_DT_SPEC_GET(DT_NODELABEL(cs43l
 static int cs43l22_write_reg(const struct device *i2c_dev, uint8_t reg_addr, uint8_t value)
 {
     uint8_t data[2] = {reg_addr, value};
-    return i2c_write(i2c_dev, data, sizeof(data), CS43L22_I2C_ADDR);
+    int ret = i2c_write(i2c_dev, data, sizeof(data), CS43L22_I2C_ADDR);
+    if (ret < 0) {
+        LOG_ERR("CS43L22 write reg 0x%02X failed: %d", reg_addr, ret);
+    }
+    return ret;
 }
 
 static int cs43l22_init(const struct device *i2c_dev)
 {
+    int ret = 0;
     gpio_pin_configure_dt(&dac_reset, GPIO_OUTPUT_INACTIVE);
     k_msleep(5);
     gpio_pin_set_dt(&dac_reset, 1);
-    k_msleep(5);
-    cs43l22_write_reg(i2c_dev, 0x02, 0x01);
-    cs43l22_write_reg(i2c_dev, 0x00, 0x99);
-    cs43l22_write_reg(i2c_dev, 0x47, 0x80);
-    cs43l22_write_reg(i2c_dev, 0x32, 0x80);
-    cs43l22_write_reg(i2c_dev, 0x32, 0x00);
-    cs43l22_write_reg(i2c_dev, 0x00, 0x00);
-    cs43l22_write_reg(i2c_dev, 0x04, 0xAF);
-    cs43l22_write_reg(i2c_dev, 0x05, 0x81);
-    cs43l22_write_reg(i2c_dev, 0x06, 0x07);
-    cs43l22_write_reg(i2c_dev, 0x20, 0xF4);
-    cs43l22_write_reg(i2c_dev, 0x21, 0xF4);
-    return cs43l22_write_reg(i2c_dev, 0x02, 0x9E);
-}
+    k_msleep(10);
 
-static void fill_test_tone(int16_t *pcm_buf, size_t num_samples)
-{
-    for (size_t i = 0; i < num_samples; i += 2) {
-        int16_t sample = ((i / 2) % 96 < 48) ? 3000 : -3000;
-        pcm_buf[i]     = sample;
-        pcm_buf[i + 1] = sample;
+    /* Required initialization sequence for CS43L22 */
+    ret |= cs43l22_write_reg(i2c_dev, 0x02, 0x01); /* Power down */
+    ret |= cs43l22_write_reg(i2c_dev, 0x00, 0x99);
+    ret |= cs43l22_write_reg(i2c_dev, 0x47, 0x80);
+    ret |= cs43l22_write_reg(i2c_dev, 0x32, 0x80);
+    ret |= cs43l22_write_reg(i2c_dev, 0x32, 0x00);
+    ret |= cs43l22_write_reg(i2c_dev, 0x00, 0x00);
+
+    /* Power Control 2: Headphone always ON, speaker OFF */
+    ret |= cs43l22_write_reg(i2c_dev, 0x04, 0xAF);
+    /* Clocking Control: Auto-detect clock speed */
+    ret |= cs43l22_write_reg(i2c_dev, 0x05, 0x81);
+    /* Interface Control 1: I2S data format, 16-bit */
+    ret |= cs43l22_write_reg(i2c_dev, 0x06, 0x07);
+    /* Headphone Channel A & B Volume (-6dB) */
+    ret |= cs43l22_write_reg(i2c_dev, 0x20, 0xF4);
+    ret |= cs43l22_write_reg(i2c_dev, 0x21, 0xF4);
+    /* Power Control 1: Power Up */
+    ret |= cs43l22_write_reg(i2c_dev, 0x02, 0x9E);
+
+    if (ret == 0) {
+        LOG_INF("CS43L22 DAC initialized and powered up successfully!");
+    } else {
+        LOG_ERR("CS43L22 DAC initialization encountered errors!");
     }
+    return ret;
 }
 
 int main(void)
 {
-#if defined(CONFIG_USB_DEVICE_STACK) && !defined(CONFIG_USB_DEVICE_INITIALIZE_AT_BOOT)
-    usb_enable(NULL);
-#endif
-    k_msleep(1000); 
+    /* If USB CDC-ACM console is used, wait briefly for host terminal DTR */
+    const struct device *const console_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+    if (device_is_ready(console_dev)) {
+        uint32_t dtr = 0;
+        for (int i = 0; i < 25 && !dtr; i++) {
+            uart_line_ctrl_get(console_dev, UART_LINE_CTRL_DTR, &dtr);
+            k_msleep(100);
+        }
+    }
+
+    LOG_INF("=== STM32F4 Audio Pipeline Boot Sequence ===");
 
     const struct device *i2c_dev    = DEVICE_DT_GET(DT_NODELABEL(i2c1));
     const struct device *i2s_tx_dev = DEVICE_DT_GET(DT_NODELABEL(i2s3));
@@ -72,6 +82,7 @@ int main(void)
         LOG_ERR("Audio peripherals not ready!");
         return -EIO;
     }
+    LOG_INF("Audio peripherals ready: I2C1, I2S3 (TX), I2S2 (RX)");
 
     struct i2s_config tx_cfg = {
         .word_size      = SAMPLE_BIT_WIDTH,
@@ -81,7 +92,7 @@ int main(void)
         .frame_clk_freq = SAMPLE_RATE,
         .mem_slab       = &audio_mem_slab,
         .block_size     = BLOCK_SIZE,
-        .timeout        = 2000,
+        .timeout        = 1000,
     };
 
     struct i2s_config rx_cfg = {
@@ -92,7 +103,7 @@ int main(void)
         .frame_clk_freq = SAMPLE_RATE,
         .mem_slab       = &audio_mem_slab,
         .block_size     = BLOCK_SIZE,
-        .timeout        = 2000,
+        .timeout        = 0, /* Non-blocking: check if RX block ready without waiting */
     };
 
     if (i2s_configure(i2s_tx_dev, I2S_DIR_TX, &tx_cfg) < 0 ||
@@ -100,39 +111,32 @@ int main(void)
         LOG_ERR("I2S configuration failed!");
         return -EIO;
     }
+    LOG_INF("I2S interfaces configured (48 kHz, 16-bit stereo)");
 
+    /* Prime TX DMA queue with smooth 500 Hz sine wave */
     for (int i = 0; i < 2; i++) {
         void *init_block;
         k_mem_slab_alloc(&audio_mem_slab, &init_block, K_FOREVER);
-        fill_test_tone((int16_t *)init_block, SAMPLES_PER_BLOCK);
+        int16_t *samples = (int16_t *)init_block;
+        for (int s = 0; s < SAMPLES_PER_BLOCK; s += 2) {
+            int16_t val = sine_500hz_table[(s / 2) % 96];
+            samples[s]     = val;
+            samples[s + 1] = val;
+        }
         i2s_write(i2s_tx_dev, init_block, BLOCK_SIZE);
     }
+    LOG_INF("TX DMA queue primed with sine wave");
 
+    audio_pipeline_start(i2s_rx_dev, i2s_tx_dev);
+
+    /* Start I2S DMA streams */
     i2s_trigger(i2s_rx_dev, I2S_DIR_RX, I2S_TRIGGER_START);
     i2s_trigger(i2s_tx_dev, I2S_DIR_TX, I2S_TRIGGER_START);
+    LOG_INF("I2S RX and TX streams triggered");
 
+    /* Initialize DAC after MCLK is running from I2S3 */
     cs43l22_init(i2c_dev);
-    
-    LOG_INF("Commit 10(a) Active: Zero-Copy I2S Loopback Running!");
 
-    while (1) {
-        void *mem_block;
-        size_t bytes_read;
-
-        int ret = i2s_read(i2s_rx_dev, &mem_block, &bytes_read);
-        if (ret < 0) {
-            LOG_WRN("RX ERR: %d. Recovering...", ret);
-            i2s_trigger(i2s_rx_dev, I2S_DIR_RX, I2S_TRIGGER_PREPARE);
-            i2s_trigger(i2s_rx_dev, I2S_DIR_RX, I2S_TRIGGER_START);
-            continue;
-        }
-
-        ret = i2s_write(i2s_tx_dev, mem_block, bytes_read);
-        if (ret < 0) {
-            k_mem_slab_free(&audio_mem_slab, mem_block);
-            LOG_WRN("TX ERR: %d. Recovering...", ret);
-            i2s_trigger(i2s_tx_dev, I2S_DIR_TX, I2S_TRIGGER_PREPARE);
-        }
-    }
+    LOG_INF("Commit 10b: Boot Sequence Complete. Audio pipeline active.");
     return 0;
 }
