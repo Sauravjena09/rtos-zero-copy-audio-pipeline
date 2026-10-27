@@ -1,5 +1,18 @@
 /* boards/stm32f4_disco.overlay */
 
+/ {
+    chosen {
+        zephyr,console = &cdc_acm_uart0;
+        zephyr,shell-uart = &cdc_acm_uart0;
+    };
+};
+
+&zephyr_udc0 {
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
 /* 1. Enable Audio PLL for 48 kHz (8 MHz / 8 * 258 / 3 = 86 MHz) */
 &plli2s {
     div-m = <8>;
@@ -28,7 +41,7 @@
     pinctrl-0 = <&i2s3_ws_pa4 &i2s3_ck_pc10 &i2s3_sd_pc12 &i2s3_mck_pc7>;
     pinctrl-names = "default";
     /* DMA1, Stream 5, Channel 0: Memory-to-Peripheral (TX) */
-   dmas = <&dma1 5 0 0x400 0x3>, /* TX: Stream 5, Channel 0 */
+    dmas = <&dma1 5 0 0x400 0x3>, /* TX: Stream 5, Channel 0 */
            <&dma1 0 0 0x400 0x3>; /* RX: Stream 0, Channel 0 */
     dma-names = "tx", "rx";
     mck-enabled;
@@ -43,5 +56,4 @@
     dmas = <&dma1 4 0 0x400 0x3>, /* TX: Stream 4, Channel 0 */
            <&dma1 3 0 0x400 0x3>; /* RX: Stream 3, Channel 0 */
     dma-names = "tx", "rx";
-
 };
