@@ -126,6 +126,7 @@ int main(void)
         i2s_write(i2s_tx_dev, init_block, BLOCK_SIZE);
     }
     LOG_INF("TX DMA queue primed with sine wave");
+    dsp_filter_init();
 
     audio_pipeline_start(i2s_rx_dev, i2s_tx_dev);
 
@@ -136,7 +137,6 @@ int main(void)
 
     /* Initialize DAC after MCLK is running from I2S3 */
     cs43l22_init(i2c_dev);
-
     LOG_INF("Commit 10b: Boot Sequence Complete. Audio pipeline active.");
     return 0;
 }

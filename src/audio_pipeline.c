@@ -24,6 +24,7 @@ const int16_t sine_500hz_table[96] = {
    -3061,-2571,-2070,-1560,-1044, -523
 };
 
+
 static const struct device *dev_rx;
 static const struct device *dev_tx;
 static K_SEM_DEFINE(pipeline_start_sem, 0, 1);
@@ -66,28 +67,29 @@ static void dsp_worker_thread(void *arg1, void *arg2, void *arg3)
     LOG_INF("DSP worker thread active");
 
     while (1) {
-        bool tone_mode = false;
+       // bool tone_mode = false;
 
         /* If an RX block arrived from Thread 1, take it; otherwise allocate a buffer for test tone */
         if (k_msgq_get(&dsp_input_q, &work_ptr, K_NO_WAIT) != 0) {
-            tone_mode = true;
+          //  tone_mode = true;
             if (k_mem_slab_alloc(&audio_mem_slab, &work_ptr, K_MSEC(20)) != 0) {
                 k_msleep(5);
                 continue;
             }
         }
+        process_audio_block(work_ptr);
 
-        int16_t *samples = (int16_t *)work_ptr;
+        // int16_t *samples = (int16_t *)work_ptr;
 
-        if (tone_mode) {
-            /* Fill block with smooth, continuous 500 Hz sine wave */
+        /*   if (tone_mode) {
+            /* Fill block with smooth, continuous 500 Hz sine wave 
             for (int i = 0; i < SAMPLES_PER_BLOCK; i += 2) {
                 int16_t val = sine_500hz_table[(phase + (i / 2)) % 96];
-                samples[i]     = val; /* Left Channel */
-                samples[i + 1] = val; /* Right Channel */
+                samples[i]     = val; /* Left Channel
+                samples[i + 1] = val; /* Right Channel 
             }
             phase = (phase + (SAMPLES_PER_BLOCK / 2)) % 96;
-        }
+        }    */
 
         /* Push to output queue (K_FOREVER blocks when queue is full, naturally pacing to DAC rate) */
         if (k_msgq_put(&dsp_output_q, &work_ptr, K_FOREVER) != 0) {
