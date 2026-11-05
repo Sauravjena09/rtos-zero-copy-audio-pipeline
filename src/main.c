@@ -32,24 +32,43 @@ static int cs43l22_init(const struct device *i2c_dev)
     gpio_pin_set_dt(&dac_reset, 1);
     k_msleep(10);
 
-    /* Required initialization sequence for CS43L22 */
-    ret |= cs43l22_write_reg(i2c_dev, 0x02, 0x01); /* Power down */
+    /* Step 1: Power down before configuration */
+    ret |= cs43l22_write_reg(i2c_dev, 0x02, 0x01);
+
+    /* Step 2: Required "magic" init sequence (from CS43L22 datasheet errata / ST BSP) */
     ret |= cs43l22_write_reg(i2c_dev, 0x00, 0x99);
     ret |= cs43l22_write_reg(i2c_dev, 0x47, 0x80);
     ret |= cs43l22_write_reg(i2c_dev, 0x32, 0x80);
     ret |= cs43l22_write_reg(i2c_dev, 0x32, 0x00);
     ret |= cs43l22_write_reg(i2c_dev, 0x00, 0x00);
 
-    /* Power Control 2: Headphone always ON, speaker OFF */
+    /* Step 3: Power Control 2: Headphone channels always ON, speaker always OFF */
     ret |= cs43l22_write_reg(i2c_dev, 0x04, 0xAF);
-    /* Clocking Control: Auto-detect clock speed */
+
+    /* Step 4: Clocking Control: Auto-detect MCLK, MCLK divided by 2 (12.288 MHz -> 6.144 MHz) */
     ret |= cs43l22_write_reg(i2c_dev, 0x05, 0x81);
-    /* Interface Control 1: I2S data format, 16-bit */
+
+    /* Step 5: Interface Control 1: I2S format, 16-bit word length */
     ret |= cs43l22_write_reg(i2c_dev, 0x06, 0x07);
-    /* Headphone Channel A & B Volume (-6dB) */
-    ret |= cs43l22_write_reg(i2c_dev, 0x20, 0xF4);
-    ret |= cs43l22_write_reg(i2c_dev, 0x21, 0xF4);
-    /* Power Control 1: Power Up */
+
+    /* Step 6: Analog ZC and Soft Ramp (required for clean transitions, no pops) */
+    ret |= cs43l22_write_reg(i2c_dev, 0x0A, 0x00);
+    ret |= cs43l22_write_reg(i2c_dev, 0x0E, 0x04);
+
+    /* Step 7: Limiter/Noise Gate — disable */
+    ret |= cs43l22_write_reg(i2c_dev, 0x27, 0x00);
+
+    /* Step 8: PCM channel volume: 0x00 = 0 dB (digital path, before DAC) */
+    ret |= cs43l22_write_reg(i2c_dev, 0x1A, 0x00); /* PCM A */
+    ret |= cs43l22_write_reg(i2c_dev, 0x1B, 0x00); /* PCM B */
+
+    /* Step 9: Master Volume A/B: 0x00 = 0 dB
+     * IMPORTANT: 0x19..0xFF = negative / muted. 0x00 = 0 dB, 0x18 = +12 dB.
+     * Previous value 0xF4 was ~-103 dB (essentially muted — silent output!) */
+    ret |= cs43l22_write_reg(i2c_dev, 0x20, 0x00); /* Master A: 0 dB */
+    ret |= cs43l22_write_reg(i2c_dev, 0x21, 0x00); /* Master B: 0 dB */
+
+    /* Step 10: Power Control 1: Power Up */
     ret |= cs43l22_write_reg(i2c_dev, 0x02, 0x9E);
 
     if (ret == 0) {
@@ -90,20 +109,20 @@ int main(void)
         .format         = I2S_FMT_DATA_FORMAT_I2S,
         .options        = I2S_OPT_BIT_CLK_MASTER | I2S_OPT_FRAME_CLK_MASTER,
         .frame_clk_freq = SAMPLE_RATE,
-        .mem_slab       = &audio_mem_slab,
-        .block_size     = BLOCK_SIZE,
-        .timeout        = 1000,
+        .mem_slab       = &pcm_tx_slab,
+        .block_size     = PCM_BYTES_PER_BLOCK,
+        .timeout        = 200,
     };
 
     struct i2s_config rx_cfg = {
         .word_size      = SAMPLE_BIT_WIDTH,
         .channels       = NUM_CHANNELS,
-        .format         = I2S_FMT_DATA_FORMAT_I2S,
-        .options        = I2S_OPT_BIT_CLK_SLAVE | I2S_OPT_FRAME_CLK_SLAVE,
-        .frame_clk_freq = SAMPLE_RATE,
-        .mem_slab       = &audio_mem_slab,
-        .block_size     = BLOCK_SIZE,
-        .timeout        = 0, /* Non-blocking: check if RX block ready without waiting */
+        .format         = I2S_FMT_DATA_FORMAT_I2S | I2S_FMT_BIT_CLK_INV,
+        .options        = I2S_OPT_BIT_CLK_MASTER | I2S_OPT_FRAME_CLK_MASTER,
+        .frame_clk_freq = 96000U,
+        .mem_slab       = &pdm_rx_slab,
+        .block_size     = PDM_BYTES_PER_BLOCK,
+        .timeout        = 200,
     };
 
     if (i2s_configure(i2s_tx_dev, I2S_DIR_TX, &tx_cfg) < 0 ||
@@ -113,30 +132,37 @@ int main(void)
     }
     LOG_INF("I2S interfaces configured (48 kHz, 16-bit stereo)");
 
-    /* Prime TX DMA queue with smooth 500 Hz sine wave */
-    for (int i = 0; i < 2; i++) {
-        void *init_block;
-        k_mem_slab_alloc(&audio_mem_slab, &init_block, K_FOREVER);
-        int16_t *samples = (int16_t *)init_block;
-        for (int s = 0; s < SAMPLES_PER_BLOCK; s += 2) {
-            int16_t val = sine_500hz_table[(s / 2) % 96];
-            samples[s]     = val;
-            samples[s + 1] = val;
-        }
-        i2s_write(i2s_tx_dev, init_block, BLOCK_SIZE);
-    }
-    LOG_INF("TX DMA queue primed with sine wave");
+    /* CS43L22 DAC: MCLK was already enabled by i2s_configure() on PC7.
+     * Initialize DAC registers and power it up before starting audio streaming. */
+    cs43l22_init(i2c_dev);
+
     dsp_filter_init();
 
-    audio_pipeline_start(i2s_rx_dev, i2s_tx_dev);
+    /* Pre-prime 2 blocks directly into I2S TX DMA queue so DMA has immediate buffers */
+    for (int i = 0; i < 2; i++) {
+        void *tx_block;
+        if (k_mem_slab_alloc(&pcm_tx_slab, &tx_block, K_MSEC(100)) == 0) {
+            int16_t *s = (int16_t *)tx_block;
+            for (int n = 0; n < SAMPLES_PER_BLOCK; n += 2) {
+                int16_t v = sine_500hz_table[(n / 2) % 96];
+                s[n]     = v;   /* Left  */
+                s[n + 1] = v;   /* Right */
+            }
+            if (i2s_write(i2s_tx_dev, tx_block, PCM_BYTES_PER_BLOCK) < 0) {
+                k_mem_slab_free(&pcm_tx_slab, tx_block);
+                LOG_ERR("TX pre-prime i2s_write failed!");
+            }
+        }
+    }
+    LOG_INF("TX DMA queue pre-primed with 2 sine-wave blocks");
 
-    /* Start I2S DMA streams */
+    /* Trigger both RX (mic PDM) and TX (DAC PCM) DMA streams BEFORE starting threads.
+     * Hardware is actively streaming so RX/TX threads never block on inactive streams. */
     i2s_trigger(i2s_rx_dev, I2S_DIR_RX, I2S_TRIGGER_START);
     i2s_trigger(i2s_tx_dev, I2S_DIR_TX, I2S_TRIGGER_START);
-    LOG_INF("I2S RX and TX streams triggered");
+    LOG_INF("I2S TX and RX streams triggered — DMA hardware active.");
 
-    /* Initialize DAC after MCLK is running from I2S3 */
-    cs43l22_init(i2c_dev);
-    LOG_INF("Commit 10b: Boot Sequence Complete. Audio pipeline active.");
+    /* NOW pre-prime dsp_output_q and unblock audio pipeline threads */
+    audio_pipeline_start(i2s_rx_dev, i2s_tx_dev);
     return 0;
 }
